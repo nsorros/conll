@@ -1,14 +1,13 @@
+from functools import partial
+
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 from datasets import load_dataset
 from tqdm import tqdm
 import torch
+import typer
 
-tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
-dataset = load_dataset("conll2003")
-labels = dataset["train"].features["ner_tags"].feature.names
-print(labels)
 
-def tokenize_and_align_labels(examples):
+def tokenize_and_align_labels(examples, tokenizer):
     tokenized_inputs = tokenizer(examples["tokens"], truncation=True, padding="max_length", is_split_into_words=True)
 
     labels = []
@@ -27,21 +26,33 @@ def tokenize_and_align_labels(examples):
     tokenized_inputs["labels"] = labels
     return tokenized_inputs
 
-dataset = dataset.map(tokenize_and_align_labels, batched=True)
-dataset = dataset.remove_columns(["pos_tags", "id", "chunk_tags", "tokens", "ner_tags"])
-dataset.set_format("torch")
+def train(pretrained_model: str = "distilbert-base-uncased", learning_rate:float=1e-5, batch_size: int=16, epochs: int=5):
+    dataset = load_dataset("conll2003")
+    labels = dataset["train"].features["ner_tags"].feature.names
 
-data = torch.utils.data.DataLoader(dataset["train"], shuffle=True, batch_size=16)
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model)
+    tokenize_and_align_labels_partial = partial(tokenize_and_align_labels, tokenizer=tokenizer)
+    dataset = dataset.map(tokenize_and_align_labels_partial, batched=True)
+    dataset = dataset.remove_columns(["pos_tags", "id", "chunk_tags", "tokens", "ner_tags"])
+    dataset.set_format("torch")
 
-model = AutoModelForTokenClassification.from_pretrained("distilbert-base-uncased", num_labels=len(labels))
+    data = torch.utils.data.DataLoader(dataset["train"], shuffle=True, batch_size=batch_size)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+    model = AutoModelForTokenClassification.from_pretrained("distilbert-base-uncased", num_labels=len(labels))
 
-for epoch in range(5):
-    for batch in tqdm(data):
-        optimizer.zero_grad()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-        outputs = model(**batch)
-        loss = outputs.loss
-        loss.backward()
-        optimizer.step()
+    for epoch in range(epochs):
+        batches = tqdm(data, desc=f"Epoch {epoch+1:2d}/{epochs:2d}")
+        for batch in batches:
+            optimizer.zero_grad()
+
+            outputs = model(**batch)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+
+            batches.set_postfix({"loss": loss.item()})
+
+if __name__ == "__main__":
+    typer.run(train)
